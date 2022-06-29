@@ -296,3 +296,16 @@ class HConn:
         for each in futures:
             result.extend(each.result())
         return result
+
+    def puts_thread(self, namespace: str, name: str, row_key_length: int, datas: List[BaseModel], batch_size=50, max_workers=10):
+        futures = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for i in range(0, len(datas), batch_size):
+                sub = executor.submit(self.puts,
+                                      namespace=namespace,
+                                      name=name,
+                                      row_key_length=row_key_length,
+                                      datas=datas[i:i + batch_size])
+                futures.append(sub)
+        for each in futures:
+            each.result()
