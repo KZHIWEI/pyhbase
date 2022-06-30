@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import math
 import struct
 from concurrent.futures import ThreadPoolExecutor
@@ -59,7 +60,7 @@ class BaseModel:
 
 
 class HConn:
-    def __init__(self, user: str, password: str, address: str, int_length: int = 64,
+    def __init__(self, user: str, password: str, address: str, int_length: int = 8,
                  int_byteorder: Literal['big', 'little'] = 'big', max_usage=10, max_size=20):
         self._user = user
         self._family = 'f'.encode('utf8')
@@ -161,6 +162,8 @@ class HConn:
             return struct.pack('d', value)
         elif isinstance(value, bytes):
             return value
+        elif isinstance(value, list) or isinstance(value, dict):
+            return json.dumps(value).encode('utf8')
         else:
             raise UnsupportedType
 
@@ -175,6 +178,8 @@ class HConn:
             return struct.unpack('d', bytes_value)[0]
         elif value_type is bytes:
             return value_type
+        elif value_type is list or value_type is dict:
+            return json.loads(bytes_value)
         else:
             raise UnsupportedType
 
@@ -191,7 +196,10 @@ class HConn:
             obj[attr] = value
             return
         elif hasattr(obj, attr):
-            converted_value = self._convert_bytes_to_value(value, type(getattr(obj, attr)))
+            current_type_value = getattr(obj, attr)
+            if not isinstance(current_type_value,type):
+                current_type_value = type(current_type_value)
+            converted_value = self._convert_bytes_to_value(value, current_type_value)
             setattr(obj, attr, converted_value)
             return
         else:
@@ -213,12 +221,12 @@ class HConn:
             if not each.row:
                 continue
             self._set_attr(temp, 'id', _format_bytes_to_id(each.row))
-            result.append(temp)
             for each_columns in each.columnValues:
                 self._set_attr(temp,
                                self._convert_bytes_to_value(each_columns.qualifier, str),
                                each_columns.value
                                )
+            result.append(temp)
         return result
 
     def deletes(self, namespace: str, name: str, row_key_length: int, ids: List[int]):
