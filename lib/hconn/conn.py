@@ -50,7 +50,7 @@ class UnsupportedType(Exception):
     pass
 
 
-@dataclass(kw_only=True)
+@dataclass()
 class BaseModel:
     id: int = 0
 

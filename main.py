@@ -8,7 +8,7 @@ from lib.hconn.conn import HConn, SplitKeyOption, BaseModel
 client = HConn('root', 'root', '')
 
 
-@dataclass(kw_only=True)
+@dataclass()
 class Ligand(BaseModel):
     # MOLBLOCK: object = list
     name: str = ''
