@@ -3,7 +3,7 @@ import json
 import math
 import struct
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Literal, Dict, Type
+from typing import List, Literal, Dict, Type, TypeVar, Any, TypedDict, Union
 
 from thrift.protocol import TBinaryProtocol
 from thrift.transport import THttpClient
@@ -81,21 +81,29 @@ class HConn:
         transport.open()
         return client, transport
 
-    def list_namespace(self):
+    def list_namespace(self) -> List[str]:
         with self._pool.item() as (client, transport):
             result = []
             for each in client.listNamespaceDescriptors():
                 result.append(each.name)
             return result
 
-    def create_namespace(self, name):
+    def list_table(self, namespace: str) -> List[str]:
+        with self._pool.item() as (client, transport):
+            result = []
+            tn = client.getTableNamesByNamespace(namespace)
+            for each in tn:
+                result.append(each.qualifier.decode())
+            return result
+
+    def create_namespace(self, name: str):
         with self._pool.item() as (client, transport):
             return client.createNamespace(TNamespaceDescriptor(name=name))
 
-    def _tableName(self, namespace, table_name):
+    def _tableName(self, namespace: str, table_name: str):
         return TTableName(ns=namespace, qualifier=table_name)
 
-    def create_table(self, namespace, name, split_option=None):
+    def create_table(self, namespace: str, name: str, split_option=None):
         with self._pool.item() as (client, transport):
             table_name = self._tableName(namespace, name)
             client.createTable(
@@ -105,7 +113,9 @@ class HConn:
                 None if not split_option else split_option.split_key()
             )
 
-    def _dataclass_to_tput(self, row_key_length: int, datas: List[BaseModel]):
+    def _dataclass_to_tput(self, row_key_length: int, datas: List[BaseModel], pluck=None):
+        if pluck is None:
+            pluck = []
         value_to_put = []
         for data in datas:
             if isinstance(data, dict) and 'id' in data:
@@ -124,10 +134,15 @@ class HConn:
             for each_key, each_value in each.items():
                 if each_key == 'id':
                     continue
+                if pluck:
+                    if each_key not in pluck:
+                        continue
                 values.append(TColumnValue(
                     family=self._family,
                     qualifier=each_key.encode('utf8'),
                     value=self._convert_value_to_bytes(each_value)))
+            if len(values) == 0:
+                continue
             puts.append(TPut(
                 row=self._convert_value_to_bytes(_format_id_with_length(each['id'], row_key_length)),
                 columnValues=values
@@ -186,8 +201,10 @@ class HConn:
     def _table_in_bytes(self, namespace, name):
         return f"{namespace}:{name}".encode("utf8")
 
-    def puts(self, namespace: str, name: str, row_key_length: int, datas: List[BaseModel]):
-        tputs = self._dataclass_to_tput(row_key_length, datas)
+    def puts(self, namespace: str, name: str, row_key_length: int, datas: List[BaseModel], pluck: List[str] = None):
+        if pluck is None:
+            pluck = []
+        tputs = self._dataclass_to_tput(row_key_length, datas, pluck=pluck)
         with self._pool.item() as (client, transport):
             client.putMultiple(table=self._table_in_bytes(namespace, name), tputs=tputs)
 
@@ -197,7 +214,7 @@ class HConn:
             return
         elif hasattr(obj, attr):
             current_type_value = getattr(obj, attr)
-            if not isinstance(current_type_value,type):
+            if not isinstance(current_type_value, type):
                 current_type_value = type(current_type_value)
             converted_value = self._convert_bytes_to_value(value, current_type_value)
             setattr(obj, attr, converted_value)
@@ -206,7 +223,7 @@ class HConn:
             return
 
     def gets(self, namespace: str, name: str, row_key_length: int, ids: List[int],
-             pluck: List[str] = None, model: Type = None):
+             pluck: List[str] = None, model: Type = None) -> List[BaseModel]:
         tgets = self._dataclass_to_tget(row_key_length, ids, pluck=pluck)
         t_result = None
         result = []
@@ -239,7 +256,7 @@ class HConn:
             client.deleteMultiple(table=self._table_in_bytes(namespace, name), tdeletes=deletes)
 
     def scan(self, namespace: str, name: str, row_key_length: int, start_id: int, end_id: int, batch_size: int = 100,
-             pluck: List[str] = None, model: Type = None):
+             pluck: List[str] = None, model: Type = None) -> List[BaseModel]:
         start_row = _format_id_with_length(start_id, row_key_length)
         stop_row = _format_id_with_length(end_id, row_key_length)
         columns = None
@@ -261,15 +278,12 @@ class HConn:
         with self._pool.item() as (client, transport):
             while True:
                 last_result = None
-                # getScannerResults会自动完成open,close 等scanner操作，HBase增强版必须使用此方法进行范围扫描
                 current_results = client.getScannerResults(self._table_in_bytes(namespace, name), scan, batch_size)
                 for result in current_results:
                     t_results.append(result)
                     last_result = result
-                # 如果一行都没有扫描出来，说明扫描已经结束，我们已经获得startRow和stopRow之间所有的result
                 if last_result is None:
                     break
-                # 如果此次扫描是有结果的，我们必须构造一个比当前最后一个result的行大的最小row，继续进行扫描，以便返回所有结果
                 else:
                     next_start_row = create_closest_row_after(last_result.row)
                     scan = TScan(startRow=next_start_row, stopRow=stop_row, caching=batch_size, columns=columns)
@@ -305,15 +319,40 @@ class HConn:
             result.extend(each.result())
         return result
 
-    def puts_thread(self, namespace: str, name: str, row_key_length: int, datas: List[BaseModel], batch_size=50, max_workers=10):
+    def puts_thread(self, namespace: str, name: str, row_key_length: int, datas: List[BaseModel], pluck=None,
+                    batch_size=50,
+                    max_workers=10):
+        if pluck is None:
+            pluck = []
         futures = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             for i in range(0, len(datas), batch_size):
                 sub = executor.submit(self.puts,
                                       namespace=namespace,
                                       name=name,
+                                      pluck=pluck,
                                       row_key_length=row_key_length,
                                       datas=datas[i:i + batch_size])
                 futures.append(sub)
         for each in futures:
             each.result()
+
+    def disable_table(self, namespace: str, table_name: str):
+        with self._pool.item() as (client, transport):
+            client.disableTable(self._tableName(namespace, table_name))
+
+    def drop_table(self, namespace: str, table_name: str):
+        with self._pool.item() as (client, transport):
+            client.deleteTable(self._tableName(namespace, table_name))
+
+    def table_exist(self, namespace: str, table_name: str) -> bool:
+        with self._pool.item() as (client, transport):
+            return client.tableExists(self._tableName(namespace, table_name))
+
+    def delete_namespace(self, namespace: str):
+        with self._pool.item() as (client, transport):
+            client.deleteNamespace(namespace)
+
+    def table_detail(self, namespace: str, table_name: str):
+        with self._pool.item() as (client, transport):
+            return client.getTableDescriptor(self._tableName(namespace, table_name))
