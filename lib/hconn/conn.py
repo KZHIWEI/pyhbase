@@ -28,6 +28,9 @@ def _format_bytes_to_id(id_bytes: bytes):
     return int(id_bytes.decode('utf8'))
 
 
+DEFAULT_SPLIT_SIZE = 3000
+
+
 @dataclass
 class SplitKeyOption:
     min_id: int
@@ -36,6 +39,8 @@ class SplitKeyOption:
 
     def split_key(self):
         result = []
+        if self.split_size <= DEFAULT_SPLIT_SIZE:
+            self.split_size = DEFAULT_SPLIT_SIZE
         str_length = len(str(self.max_id))
         for i in range(self.min_id, self.max_id, self.split_size):
             result.append(_format_id_with_length(i, str_length))
